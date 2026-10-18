@@ -34,7 +34,7 @@ jobs:
           TARGET_SITE: ${{ secrets.TARGET_SITE }}
           TARGET_ACTIVITIES: ${{ secrets.TARGET_ACTIVITIES }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          RULES: "0@20:30,2@20:30,4@20:30,5@00:00,6@00:00"
+          RULES: "0@20:30,2@20:30,4@20:30,5@10:00,6@10:00"
         run: python check.py
 
       - name: Save
