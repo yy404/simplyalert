@@ -74,16 +74,7 @@ def fetch():
     return data
 
 
-def booking_id(s):
-    try:
-        return json.loads(s["slotReferences"]["inCentre"]).get("BookingId", 0)
-    except Exception:
-        return 0
-
-
 def is_free(s):
-    if s.get("isBeforeTimetableSlotBookablePeriod"):
-        return (s.get("availability") or {}).get("inCentre", 0) > 0 and not booking_id(s)
     return s.get("status") == "Available"
 
 
