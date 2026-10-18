@@ -10,9 +10,11 @@ HOST = os.environ["TARGET_HOST"]
 SITE_ID = os.environ["TARGET_SITE"]
 ACTIVITY_IDS = os.environ["TARGET_ACTIVITIES"]
 NTFY_TOPIC = os.environ["NTFY_TOPIC"]
-WEEKDAYS = {int(d) for d in os.getenv("WEEKDAYS", "5,6").split(",")}
-EARLIEST_HOUR = int(os.getenv("EARLIEST_HOUR", "0"))
-LATEST_HOUR = int(os.getenv("LATEST_HOUR", "24"))
+RULES = {}
+for part in os.getenv("RULES", "5@00:00,6@00:00").split(","):
+    day, t = part.strip().split("@")
+    h, m = t.split(":")
+    RULES[int(day)] = int(h) * 60 + int(m)
 TZ = ZoneInfo(os.getenv("LOCAL_TZ", "Europe/London"))
 STATE_FILE = "state.json"
 
@@ -71,7 +73,8 @@ def free_slots(data):
                 if s.get("status") != "Available" or s.get("isBeforeTimetableSlotBookablePeriod"):
                     continue
                 start = datetime.fromisoformat(s["startTime"].replace("Z", "+00:00")).astimezone(TZ)
-                if start.weekday() not in WEEKDAYS or not (EARLIEST_HOUR <= start.hour < LATEST_HOUR):
+                earliest = RULES.get(start.weekday())
+                if earliest is None or start.hour * 60 + start.minute < earliest:
                     continue
                 raw = f"{s['startTime']}|{loc['locationNameToDisplay']}|{mins}"
                 key = hashlib.sha256(raw.encode()).hexdigest()[:16]
