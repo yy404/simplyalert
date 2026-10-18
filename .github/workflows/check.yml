@@ -1,0 +1,47 @@
+name: check
+
+on:
+  schedule:
+    - cron: "2,12,22,32,42,52 0,7-23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install -q requests playwright
+          which google-chrome || python -m playwright install --with-deps chromium
+
+      - name: Run
+        env:
+          TARGET_HOST: ${{ secrets.TARGET_HOST }}
+          TARGET_SITE: ${{ secrets.TARGET_SITE }}
+          TARGET_ACTIVITIES: ${{ secrets.TARGET_ACTIVITIES }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          WEEKDAYS: "5,6"
+          EARLIEST_HOUR: "0"
+          LATEST_HOUR: "24"
+        run: python check.py
+
+      - name: Save
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || (git commit -m "update" && git push)
