@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -15,6 +15,7 @@ for part in os.getenv("RULES", "5@00:00,6@00:00").split(","):
     day, t = part.strip().split("@")
     h, m = t.split(":")
     RULES[int(day)] = int(h) * 60 + int(m)
+DAYS = int(os.getenv("DAYS", "14"))
 TZ = ZoneInfo(os.getenv("LOCAL_TZ", "Europe/London"))
 STATE_FILE = "state.json"
 
@@ -31,17 +32,16 @@ def launch(p):
         return p.chromium.launch()
 
 
+def iso(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def fetch():
     from playwright.sync_api import sync_playwright
 
     now = datetime.now(timezone.utc)
-    params = {
-        "webBookableOnly": "true",
-        "siteIds": SITE_ID,
-        "activityIds": ACTIVITY_IDS,
-        "dateFrom": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-        "dateTo": (now + timedelta(days=8)).strftime("%Y-%m-%dT23:59:59.999Z"),
-    }
+    end = datetime.combine((now + timedelta(days=DAYS)).date(), time(23, 59, 59), tzinfo=timezone.utc)
+    data = []
     with sync_playwright() as p:
         browser = launch(p)
         ctx = browser.new_context(user_agent=UA, locale="en-GB")
@@ -51,16 +51,40 @@ def fetch():
             if any(c["name"] == "Jwt" for c in ctx.cookies()):
                 break
             page.wait_for_timeout(500)
-        r = ctx.request.get(
-            f"{BASE}/api/availability/V2/sessions", params=params,
-            headers={"referer": PAGE_URL, "x-use-sso": "1",
-                     "accept": "application/json, text/plain, */*"},
-            timeout=30000)
-        if not r.ok:
-            raise RuntimeError(f"HTTP {r.status}")
-        data = r.json()
+        start = now
+        while start < end:
+            stop = min(start + timedelta(days=7), end)
+            params = {
+                "webBookableOnly": "true",
+                "siteIds": SITE_ID,
+                "activityIds": ACTIVITY_IDS,
+                "dateFrom": iso(start),
+                "dateTo": iso(stop),
+            }
+            r = ctx.request.get(
+                f"{BASE}/api/availability/V2/sessions", params=params,
+                headers={"referer": PAGE_URL, "x-use-sso": "1",
+                         "accept": "application/json, text/plain, */*"},
+                timeout=30000)
+            if not r.ok:
+                raise RuntimeError(f"HTTP {r.status}")
+            data += r.json()
+            start = stop
         browser.close()
     return data
+
+
+def booking_id(s):
+    try:
+        return json.loads(s["slotReferences"]["inCentre"]).get("BookingId", 0)
+    except Exception:
+        return 0
+
+
+def is_free(s):
+    if s.get("isBeforeTimetableSlotBookablePeriod"):
+        return (s.get("availability") or {}).get("inCentre", 0) > 0 and not booking_id(s)
+    return s.get("status") == "Available"
 
 
 def free_slots(data):
@@ -70,7 +94,7 @@ def free_slots(data):
         for loc in act.get("locations", []):
             court = loc["locationNameToDisplay"].split()[-1]
             for s in loc.get("slots", []):
-                if s.get("status") != "Available" or s.get("isBeforeTimetableSlotBookablePeriod"):
+                if not is_free(s):
                     continue
                 start = datetime.fromisoformat(s["startTime"].replace("Z", "+00:00")).astimezone(TZ)
                 earliest = RULES.get(start.weekday())
@@ -80,6 +104,17 @@ def free_slots(data):
                 key = hashlib.sha256(raw.encode()).hexdigest()[:16]
                 out[key] = f"{start:%a %d/%m %H:%M} - {mins}min - Court {court}"
     return out
+
+
+def pre_stats(data):
+    total = free = 0
+    for act in data:
+        for loc in act.get("locations", []):
+            for s in loc.get("slots", []):
+                if s.get("isBeforeTimetableSlotBookablePeriod"):
+                    total += 1
+                    free += is_free(s)
+    return total, free
 
 
 def notify(lines):
@@ -98,9 +133,11 @@ def main():
     except (FileNotFoundError, json.JSONDecodeError):
         seen = set()
 
-    free = free_slots(fetch())
+    data = fetch()
+    free = free_slots(data)
     new = {k: v for k, v in free.items() if k not in seen}
-    print(f"free={len(free)} new={len(new)}")
+    pre_total, pre_free = pre_stats(data)
+    print(f"free={len(free)} new={len(new)} pre_total={pre_total} pre_free={pre_free}")
     if new:
         notify(new.values())
 
