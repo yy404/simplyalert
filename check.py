@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+import subprocess
+import time as clock
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -18,6 +20,9 @@ for part in os.getenv("RULES", "5@00:00,6@00:00").split(","):
 DAYS = int(os.getenv("DAYS", "14"))
 TZ = ZoneInfo(os.getenv("LOCAL_TZ", "Europe/London"))
 STATE_FILE = "state.json"
+LOOP_MINUTES = int(os.getenv("LOOP_MINUTES", "0"))
+INTERVAL = int(os.getenv("INTERVAL", "300"))
+QUIET_START, QUIET_END = (int(x) for x in os.getenv("QUIET_HOURS", "1-7").split("-"))
 
 BASE = f"https://{HOST}"
 PAGE_URL = f"{BASE}/book"
@@ -117,23 +122,50 @@ def notify(lines):
     )
 
 
-def main():
+def load_state():
     try:
         with open(STATE_FILE) as f:
-            seen = set(json.load(f))
+            return set(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        seen = set()
+        return set()
 
+
+def commit():
+    subprocess.run(["git", "add", STATE_FILE], check=True)
+    if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0:
+        return
+    subprocess.run(["git", "commit", "-qm", "update"], check=True)
+    subprocess.run(["git", "pull", "--rebase", "-q"], check=True)
+    subprocess.run(["git", "push", "-q"], check=True)
+
+
+def check_once():
+    seen = load_state()
     data = fetch()
     free = free_slots(data)
     new = {k: v for k, v in free.items() if k not in seen}
     pre_total, pre_free = pre_stats(data)
-    print(f"free={len(free)} new={len(new)} pre_total={pre_total} pre_free={pre_free}")
+    print(f"{datetime.now(TZ):%H:%M} free={len(free)} new={len(new)} "
+          f"pre_total={pre_total} pre_free={pre_free}", flush=True)
     if new:
         notify(new.values())
+    if set(free) != seen:
+        with open(STATE_FILE, "w") as f:
+            json.dump(sorted(free), f)
+        commit()
 
-    with open(STATE_FILE, "w") as f:
-        json.dump(sorted(free), f)
+
+def main():
+    deadline = clock.monotonic() + LOOP_MINUTES * 60
+    while True:
+        if not QUIET_START <= datetime.now(TZ).hour < QUIET_END:
+            try:
+                check_once()
+            except Exception as e:
+                print(f"{datetime.now(TZ):%H:%M} error {type(e).__name__}", flush=True)
+        if clock.monotonic() + INTERVAL > deadline:
+            break
+        clock.sleep(INTERVAL)
 
 
 if __name__ == "__main__":
